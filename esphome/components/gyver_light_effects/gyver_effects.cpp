@@ -2,6 +2,7 @@
 #include "palettes.h"
 #include "esphome/core/log.h"
 #include "noise.h"
+#include "dsps_fft2r.h"
 
 namespace esphome {
 namespace gyver_effects {
@@ -35,6 +36,10 @@ const uint8_t FIRE_HUE_MASK[11][8] PROGMEM = {
   {0 , 0 , 0 , 0 , 0 , 0 , 0 , 0 },
 };
 // clang-format on
+
+static const size_t SAMPLE_RATE_HZ = 16000;
+static const size_t INPUT_BUFFER_SIZE = 32 * SAMPLE_RATE_HZ / 1000;  // 32ms * 16kHz / 1000ms
+static const size_t SPECTRUM_SIZE = INPUT_BUFFER_SIZE / 2;
 
 void FireLightEffect::apply(light::AddressableLight &it, const Color &current_color) {
   auto current_hue = rgb_to_hue(current_color);
@@ -104,17 +109,42 @@ uint8_t FireLightEffect::rgb_to_hue(const Color &current_color) {
   return 0;
 }
 
+void PerlinLightEffect::start() {
+  if (this->palette_ptr_ != nullptr) {
+    this->palette_ = std::make_unique<GRGBPalette16>(this->palette_ptr_);
+  }
+  AddressableLightEffect::start();
+}
+
+void PerlinLightEffect::stop() {
+  this->palette_.reset();
+  AddressableLightEffect::stop();
+}
+
 void PerlinLightEffect::apply(light::AddressableLight &it, const Color &current_color) {
   for (uint8_t y = 0; y < this->get_height(); y++) {
     for (uint8_t x = 0; x < this->get_width(); x++) {
       it[this->get_pix(x, y)] = ColorFromPalette(
-          this->palette_,
+          *(this->palette_),
           inoise8(x * (this->scale_ / 5) - this->get_width() * (this->scale_ / 5) / 2,
                   y * (this->scale_ / 5) - this->get_height() * (this->scale_ / 5) / 2, millis() * this->speed_ / 255),
           255, LINEARBLEND);
     }
   }
   it.schedule_show();
+}
+
+
+void ConfettiLightEffect::start() {
+  if (this->palette_ptr_ != nullptr) {
+    this->palette_ = std::make_unique<GRGBPalette16>(this->palette_ptr_);
+  }
+  AddressableLightEffect::start();
+}
+
+void ConfettiLightEffect::stop() {
+  this->palette_.reset();
+  AddressableLightEffect::stop();
 }
 
 void ConfettiLightEffect::apply(light::AddressableLight &it, const Color &current_color) {
@@ -133,7 +163,7 @@ void ConfettiLightEffect::apply(light::AddressableLight &it, const Color &curren
           break;
         }
         case ConfettiType::Palette: {
-          it[x] = ColorFromPalette(this->palette_, i * 255 / curr_val, 255, LINEARBLEND);
+          it[x] = ColorFromPalette(*(this->palette_), i * 255 / curr_val, 255, LINEARBLEND);
           break;
         }
         case ConfettiType::Random:
@@ -156,17 +186,32 @@ void ConfettiLightEffect::apply(light::AddressableLight &it, const Color &curren
   it.schedule_show();
 }
 
+void GradientLightEffect::start() {
+  if (this->palette_ptr_ != nullptr) {
+    this->palette_ = std::make_unique<GRGBPalette16>(this->palette_ptr_);
+  }
+  AddressableLightEffect::start();
+}
+
+void GradientLightEffect::stop() {
+  this->palette_.reset();
+  AddressableLightEffect::stop();
+}
+
 void GradientLightEffect::apply(light::AddressableLight &it, const Color &current_color) {
+
+  uint8_t bright{255};
+
   const uint32_t now = millis();
   if (now - this->last_update_ < this->update_interval_)
     return;
   this->last_update_ = now;
 
+  
   if (this->from_center_) {  // from center
     for (uint32_t y = this->get_height() / 2; y < this->get_height(); y++) {
-      uint8_t bright = 255;
       Color crgb =
-          ColorFromPalette(this->palette_, y * this->scale_ / this->get_height() + now * (this->speed_ - 127) / 800,
+          ColorFromPalette(*(this->palette_), y * this->scale_ / this->get_height() + now * (this->speed_ - 127) / 800,
                            bright, LINEARBLEND);
       for (uint16_t x = 0; x < this->get_width(); x++) {
         it[this->get_pix(x, y)] = crgb;
@@ -179,8 +224,7 @@ void GradientLightEffect::apply(light::AddressableLight &it, const Color &curren
     }
   } else {
     for (uint32_t y = 0; y < this->get_height(); y++) {
-      uint8_t bright = 255;
-      Color crgb = ColorFromPalette(this->palette_, y * 127 / this->get_height() + now * (this->speed_ - 127) / 800,
+      Color crgb = ColorFromPalette(*(this->palette_), y * 127 / this->get_height() + now * (this->speed_ - 127) / 800,
                                     bright, LINEARBLEND);
       for (uint16_t x = 0; x < this->get_width(); x++) {
         it[this->get_pix(x, y)] = crgb;
@@ -188,6 +232,85 @@ void GradientLightEffect::apply(light::AddressableLight &it, const Color &curren
     }
   }
 
+  it.schedule_show();
+}
+
+
+
+void SpectrumLightEffect::start() {
+  if (this->palette_ptr_ != nullptr) {
+    this->palette_ = std::make_unique<GRGBPalette16>(this->palette_ptr_);
+  }
+  this->enable_mic_();
+  AddressableLightEffect::start();
+}
+
+void SpectrumLightEffect::stop() {
+  this->disable_mic_();
+  this->palette_.reset();
+  AddressableLightEffect::stop();
+}
+
+void SpectrumLightEffect::apply(light::AddressableLight &it, const Color &current_color) {
+  
+  this->process_mic_();
+
+  const uint32_t now = millis();
+  if (now - this->last_update_ < this->update_interval_)
+    return;
+  this->last_update_ = now;
+
+  it.all().darken(this->fade_speed_);
+
+  int bucket_size = SPECTRUM_SIZE / this->get_width();
+  uint8_t hue_delta = 255 / this->get_width();
+  for (int i=0;i<this->get_width();i++){
+    float_t bucket_value{0};  
+    for (int j=0;j<bucket_size;j++) {
+      bucket_value += this->spectrum_[i*bucket_size+j];
+    }
+    int16_t y_val = ((float_t)this->get_height() * bucket_value / (float_t)bucket_size - this->noise_lvl_) / this->scale_;
+    
+    if(this->from_center_){
+      int16_t height = this->get_height()/2;
+      for (uint16_t y = 0; y < std::min(y_val,height); y++) {
+        Color tc = Color::BLACK;
+        switch (this->type_)
+        {
+        case SpectrumType::Hue:
+          tc = GHSV(i*hue_delta,255,255).to_rgb();
+          break;
+        case SpectrumType::Palette:
+          tc = ColorFromPalette(*(this->palette_), y * 255 / height, 255, LINEARBLEND);
+          break;      
+        default:
+          tc = current_color;
+          break;
+        }
+        it[this->get_pix(i,height + y)] = tc;
+        it[this->get_pix(i,height - y)] = tc;
+      }
+    
+    } else {
+      for (int16_t y=0;y<std::min(y_val,(int16_t)this->get_height());y++){
+        Color tc = Color::BLACK;
+        switch (this->type_)
+        {
+        case SpectrumType::Hue:
+          tc = GHSV(i*hue_delta,255,255).to_rgb();
+          break;
+        case SpectrumType::Palette:
+          tc = ColorFromPalette(*(this->palette_), y * 255 / this->get_height(), 255, LINEARBLEND);
+          break;      
+        default:
+          tc = current_color;
+          break;
+        }
+        it[this->get_pix(i,y)] = tc;
+      }
+    }
+  }
+  
   it.schedule_show();
 }
 
@@ -227,5 +350,67 @@ void ParticlesLightEffect::apply(light::AddressableLight &it, const Color &curre
   it.schedule_show();
 }
 
-}  // namespace gyver_effects
+void BaseGyverLightEffect::enable_mic_()
+{
+  if (this->use_mic_) {
+    this->spectrum_ = std::make_unique<float[]>(SPECTRUM_SIZE);
+    this->mic_buffer_ = (int16_t *)aligned_alloc(16, (INPUT_BUFFER_SIZE + 16) * sizeof(int16_t) * 2);
+    esp_err_t ret = dsps_fft2r_init_sc16(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    if (ret != ESP_OK) {
+        esph_log_d("gyver_effects", "Not possible to initialize FFT esp-dsp from library!");
+        return;
+    }
+    this->settings_->get_microphone()->start();
+  }
+}
+
+void BaseGyverLightEffect::process_mic_()
+{
+  if (this->use_mic_)
+  {
+    auto mic = this->settings_->get_microphone();
+    if (mic->is_running())
+    {
+      auto bytes_read = mic->read(this->mic_buffer_, INPUT_BUFFER_SIZE * sizeof(int16_t));
+      if (bytes_read > 0)
+      {
+        for (int i = bytes_read / sizeof(int16_t) - 1; i >= 0; i--)
+        {
+          this->mic_buffer_[i * 2] = this->mic_buffer_[i];
+          this->mic_buffer_[i * 2 + 1] = 0;
+        }
+
+        // Call FFT bit reverse
+        dsps_fft2r_sc16_ae32(this->mic_buffer_, INPUT_BUFFER_SIZE);
+        dsps_bit_rev_sc16_ansi(this->mic_buffer_, INPUT_BUFFER_SIZE);
+        // Convert spectrum from two input channels to two
+        // spectrums for two channels.
+        dsps_cplx2reC_sc16(this->mic_buffer_, INPUT_BUFFER_SIZE);
+
+        float_t mx = 0;
+        for (int i = 0; i < SPECTRUM_SIZE; i++)
+        {
+          float_t sp = this->mic_buffer_[i * 2] * this->mic_buffer_[i * 2] + this->mic_buffer_[i * 2 + 1] * this->mic_buffer_[i * 2 + 1];
+          sp = 10 * log10f(0.1 + sp);
+          this->spectrum_[i] = 0.8 * this->spectrum_[i] + 0.2 * sp;
+        }
+      }
+    }
+  }
+}
+
+void BaseGyverLightEffect::disable_mic_()
+{
+  if (this->use_mic_){
+    this->settings_->get_microphone()->stop();
+    dsps_fft2r_deinit_sc16();
+    if(this->mic_buffer_ != nullptr){
+      free(this->mic_buffer_);
+      this->mic_buffer_ = nullptr;
+    }
+    this->spectrum_.reset();
+  }
+}
+
+} // namespace gyver_effects
 }  // namespace esphome

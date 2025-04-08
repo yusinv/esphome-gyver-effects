@@ -1,4 +1,3 @@
-#pragma once
 /// @file noise.cpp
 /// Functions to generate and fill arrays with noise.
 

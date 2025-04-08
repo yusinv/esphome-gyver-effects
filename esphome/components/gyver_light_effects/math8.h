@@ -2,6 +2,9 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 
+namespace esphome {
+namespace gyver_effects {
+
 /// @file scale8.h
 /// Fast, efficient 8-bit scaling functions specifically
 /// designed for high-performance LED programming.
@@ -114,3 +117,6 @@ ESPHOME_ALWAYS_INLINE static inline uint8_t qadd8(uint8_t i, uint8_t j) {
     t = 255;
   return t;
 }
+
+}  // namespace gyver_effects
+}  // namespace esphome

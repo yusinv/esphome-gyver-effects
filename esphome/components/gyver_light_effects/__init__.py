@@ -2,6 +2,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components.light.types import AddressableLightEffect
 from esphome.components.light.effects import register_addressable_effect
+from esphome.components import esp32,microphone
 from esphome.const import (
     CONF_ID,
     CONF_NAME,
@@ -11,14 +12,18 @@ from esphome.const import (
     CONF_PIXEL_MAPPER,
     CONF_COLOR_PALETTE,
     CONF_UPDATE_INTERVAL,
-    CONF_TYPE
+    CONF_TYPE,
+    CONF_MICROPHONE
 )
 
 CONF_SCALE = "scale"
 CONF_AMOUNT = "amount"
 CONF_FROM_CENTER = "from_center"
 CONF_FADE_FRAMES = "fade_frames"
+CONF_FADE_SPEED = "fade_speed"
 CONF_GEN_SPEED = "generation_speed"
+CONF_USE_MIC = "use_microphone"
+CONF_NOISE_LVL = "noise_level"
 
 
 
@@ -29,7 +34,9 @@ PerlinLightEffect = gyver_effects_ns.class_("PerlinLightEffect", BaseGyverLightE
 ConfettiLightEffect = gyver_effects_ns.class_("ConfettiLightEffect", BaseGyverLightEffect)
 GradientLightEffect = gyver_effects_ns.class_("GradientLightEffect", BaseGyverLightEffect)
 ParticlesLightEffect = gyver_effects_ns.class_("ParticlesLightEffect", BaseGyverLightEffect)
+SpectrumLightEffect = gyver_effects_ns.class_("SpectrumLightEffect", BaseGyverLightEffect)
 ConfettiType = ConfettiLightEffect.enum("ConfettiType",True)
+SpectrumType = SpectrumLightEffect.enum("SpectrumType",True)
 GyverLightSettings = gyver_effects_ns.class_("GyverLightSettings")
 
 MAPPIING_CONFETTI_TYPE = {
@@ -38,6 +45,12 @@ MAPPIING_CONFETTI_TYPE = {
     "select": ConfettiType.Select
 }
 
+
+MAPPIING_SPECTRUM_TYPE = {
+    "hue": SpectrumType.Hue,
+    "palette": SpectrumType.Palette,
+    "select": SpectrumType.Select
+}
 
 MAPPIING_PALETTES = {
     "sunset" : gyver_effects_ns.namespace("PALETTE_SUNSET_REAL"),
@@ -64,10 +77,18 @@ CONFIG_SCHEMA = cv.All(cv.Schema({
     cv.Required(CONF_WIDTH): cv.positive_int,
     cv.Required(CONF_HEIGHT): cv.positive_int,
     cv.Required(CONF_PIXEL_MAPPER): cv.returning_lambda,
+    cv.Optional(CONF_MICROPHONE): cv.use_id(microphone.Microphone)
 }).extend(cv.COMPONENT_SCHEMA))
 
 
 async def to_code(config):
+    
+    esp32.add_idf_component(
+        name="esp-dsp",
+        repo="https://github.com/espressif/esp-dsp",
+        ref="v1.5.2",
+    )
+
     var = cg.new_Pvariable(config[CONF_ID])
     pixel_mapper = config[CONF_PIXEL_MAPPER]
     global pixel_mapper_template_
@@ -79,6 +100,8 @@ async def to_code(config):
     cg.add(var.set_width(config[CONF_WIDTH]))
     cg.add(var.set_height(config[CONF_HEIGHT]))
     cg.add(var.set_pixel_mapper(pixel_mapper_template_))
+    if mic:= config.get(CONF_MICROPHONE):
+        cg.add(var.set_microphone(await cg.get_variable(mic)))
 
 BASE_EFFECT_SCHEMA = cv.Schema({
     cv.GenerateID(CONF_ID): cv.use_id(GyverLightSettings),
@@ -151,7 +174,8 @@ async def confetti_effect_to_code(config, effect_id):
         cv.Optional(CONF_COLOR_PALETTE, default="sunset"): cv.enum(MAPPIING_PALETTES),
         cv.Optional(CONF_UPDATE_INTERVAL, default='16ms'): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_FROM_CENTER,default=False): cv.boolean,
-        cv.Optional(CONF_SCALE, default=127): cv.uint8_t
+        cv.Optional(CONF_SCALE, default=127): cv.uint8_t,
+        cv.Optional(CONF_USE_MIC, default = False): cv.boolean
     })).schema,
 )
 async def gradient_effect_to_code(config, effect_id):
@@ -159,6 +183,7 @@ async def gradient_effect_to_code(config, effect_id):
     cg.add(var.set_speed(config[CONF_SPEED]))
     cg.add(var.set_from_center(config[CONF_FROM_CENTER]))
     cg.add(var.set_palette(config[CONF_COLOR_PALETTE]))
+    cg.add(var.set_use_microphone(config[CONF_USE_MIC]))
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
     cg.add(var.set_settings(await cg.get_variable(config[CONF_ID])))
     return var
@@ -181,6 +206,40 @@ async def gradient_effect_to_code(config, effect_id):
     cg.add(var.set_speed(config[CONF_SPEED]))
     cg.add(var.set_from_center(config[CONF_FROM_CENTER]))
     cg.add(var.set_palette(config[CONF_COLOR_PALETTE]))
+    cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
+    cg.add(var.set_settings(await cg.get_variable(config[CONF_ID])))
+    return var
+
+@register_addressable_effect(
+    "spectrum",
+    SpectrumLightEffect,
+    "Spectrum",
+    BASE_EFFECT_SCHEMA.extend(cv.Schema({
+        cv.Optional(CONF_FADE_SPEED): cv.uint8_t,
+        cv.Optional(CONF_COLOR_PALETTE): cv.enum(MAPPIING_PALETTES),
+        cv.Optional(CONF_UPDATE_INTERVAL, default='16ms'): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_FROM_CENTER): cv.boolean,
+        cv.Optional(CONF_SCALE): cv.positive_float,
+        cv.Optional(CONF_USE_MIC, default = False): cv.boolean,
+        cv.Optional(CONF_NOISE_LVL): cv.positive_float,
+        cv.Optional(CONF_TYPE): cv.enum(MAPPIING_SPECTRUM_TYPE)
+    })).schema,
+)
+async def spectrum_effect_to_code(config, effect_id):
+    var = cg.new_Pvariable(effect_id, config[CONF_NAME])
+    if fade_speed := config.get(CONF_FADE_SPEED):
+        cg.add(var.set_fade_speed(fade_speed))
+    if from_center := config.get(CONF_FROM_CENTER):
+        cg.add(var.set_from_center(from_center))
+    if palette := config.get(CONF_COLOR_PALETTE):
+        cg.add(var.set_palette(palette))
+    if scale := config.get(CONF_SCALE):
+        cg.add(var.set_scale(scale))
+    if noise_lvl := config.get(CONF_NOISE_LVL):
+        cg.add(var.set_noise_lvl(noise_lvl))
+    if type := config.get(CONF_TYPE):
+        cg.add(var.set_type(type))
+    cg.add(var.set_use_microphone(config[CONF_USE_MIC]))
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
     cg.add(var.set_settings(await cg.get_variable(config[CONF_ID])))
     return var
